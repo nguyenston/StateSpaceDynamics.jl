@@ -13,6 +13,20 @@ function test_pretty_printing()
     @test println(io1, ge1) === nothing
     @test println(io1, ge2) === nothing
 
+    # Beta Emission
+
+    be = BetaEmission(1, 2.0, 3.0)
+    push!(objs, be)
+
+    @test println(io1, be) === nothing
+
+    # Student t Emission
+
+    ste = StudentTEmission(1, 4.0, 0.5, 1.5)
+    push!(objs, ste)
+
+    @test println(io1, ste) === nothing
+
     # Gaussian Regression Emission
 
     gre = GaussianRegressionEmission(3, 3, rand(3, 3), rand(3, 3), true, 0.5)

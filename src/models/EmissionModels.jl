@@ -7,7 +7,8 @@ This module implements various emission models for state space modeling, includi
 """
 
 # Exports
-export EmissionModel, GaussianEmission, WrappedCauchyEmission
+export EmissionModel, GaussianEmission, BetaEmission, StudentTEmission
+export WrappedCauchyEmission
 export RegressionEmission, GaussianRegressionEmission, BernoulliRegressionEmission
 export PoissonRegressionEmission, AutoRegressionEmission
 export loglikelihood, fit!
@@ -136,6 +137,264 @@ function fit!(
 end
 
 #=
+Beta Emission Models
+=#
+
+"""
+    mutable struct BetaEmission <: EmissionModel
+
+Univariate Beta emission model on `(0, 1)`.
+This emission is intentionally restricted to `output_dim == 1` so it does not
+pretend to be a multivariate Beta model.
+"""
+mutable struct BetaEmission{T<:Real} <: EmissionModel
+    output_dim::Int
+    α::T
+    β::T
+
+    function BetaEmission(output_dim::Int, α::T, β::T) where {T<:Real}
+        output_dim == 1 || error("BetaEmission is univariate only; use output_dim=1.")
+        α > zero(T) || error("Beta parameter α must satisfy α > 0.")
+        β > zero(T) || error("Beta parameter β must satisfy β > 0.")
+        return new{T}(output_dim, α, β)
+    end
+end
+
+function Base.show(io::IO, be::BetaEmission; gap="")
+    println(io, gap, "Beta Emission model:")
+    println(io, gap, "--------------------")
+    println(io, gap, " output_dim = $(be.output_dim)")
+    println(io, gap, " α = $(round(be.α, digits=3))")
+    println(io, gap, " β = $(round(be.β, digits=3))")
+
+    return nothing
+end
+
+"""
+    BetaEmission(; output_dim::Int=1, α::Real, β::Real)
+
+Create a BetaEmission model.
+"""
+function BetaEmission(; output_dim::Int=1, α::Real, β::Real)
+    αT, βT = promote(α, β)
+    return BetaEmission(output_dim, αT, βT)
+end
+
+"""
+    loglikelihood(model::BetaEmission, Y::AbstractMatrix{T}) where {T<:Real}
+
+Calculate the log likelihood of the data `Y` given the Beta emission model.
+"""
+function loglikelihood(model::BetaEmission, Y::AbstractMatrix{T}) where {T<:Real}
+    n_obs, d = size(Y)
+    if d != model.output_dim
+        error("Y has $(d) columns, expected $(model.output_dim).")
+    end
+
+    eps_T = sqrt(eps(T))
+    dist = Beta(model.α, model.β)
+    ll = Vector{T}(undef, n_obs)
+
+    @inbounds for i in 1:n_obs
+        y = clamp(Y[i, 1], eps_T, one(T) - eps_T)
+        ll[i] = logpdf(dist, y)
+    end
+
+    return ll
+end
+
+"""
+    Random.rand(rng::AbstractRNG, model::BetaEmission; n::Int=1)
+
+Generate `n` samples from a univariate Beta emission model.
+"""
+function Random.rand(rng::AbstractRNG, model::BetaEmission; n::Int=1)
+    dist = Beta(model.α, model.β)
+    return reshape(rand(rng, dist, n), n, 1)
+end
+
+"""
+    Random.rand(model::BetaEmission; kwargs...)
+
+Generate random samples from a Beta emission model.
+"""
+function Random.rand(model::BetaEmission; kwargs...)
+    return rand(Random.default_rng(), model; kwargs...)
+end
+
+"""
+    fit!(model::BetaEmission, Y::AbstractMatrix{T}, w::AbstractVector{T}=ones(size(Y, 1))) where {T<:Real}
+
+Fit a univariate BetaEmission model to data `Y` using weighted moment matching.
+"""
+function fit!(
+    model::BetaEmission, Y::AbstractMatrix{T}, w::AbstractVector{T}=ones(size(Y, 1))
+) where {T<:Real}
+    n_obs, d = size(Y)
+    if d != model.output_dim
+        error("Y has $(d) columns, expected $(model.output_dim).")
+    end
+    if length(w) != n_obs
+        error("w has length $(length(w)), expected $(n_obs).")
+    end
+
+    wsum = sum(w)
+    wsum <= 0 && return model
+
+    eps_T = sqrt(eps(T))
+    yj = clamp.(@view(Y[:, 1]), eps_T, one(T) - eps_T)
+    μ = sum(w .* yj) / wsum
+    centered = yj .- μ
+    σ2 = sum(w .* (centered .^ 2)) / wsum
+
+    μ = clamp(μ, eps_T, one(T) - eps_T)
+    σ2_max = μ * (one(T) - μ)
+    σ2 = clamp(σ2, eps_T, σ2_max - eps_T)
+
+    ν = max(μ * (one(T) - μ) / σ2 - one(T), T(2))
+    model.α = max(μ * ν, eps_T)
+    model.β = max((one(T) - μ) * ν, eps_T)
+
+    return model
+end
+
+#=
+Student T Emission Models
+=#
+
+"""
+    mutable struct StudentTEmission <: EmissionModel
+
+Univariate location-scale Student t emission model.
+The degrees of freedom `ν` are treated as fixed; `fit!` updates only the location
+`μ` and scale `σ`.
+"""
+mutable struct StudentTEmission{T<:Real} <: EmissionModel
+    output_dim::Int
+    ν::T
+    μ::T
+    σ::T
+
+    function StudentTEmission(output_dim::Int, ν::T, μ::T, σ::T) where {T<:Real}
+        output_dim == 1 || error("StudentTEmission is univariate only; use output_dim=1.")
+        ν > zero(T) || error("Student t parameter ν must satisfy ν > 0.")
+        σ > zero(T) || error("Student t scale σ must satisfy σ > 0.")
+        return new{T}(output_dim, ν, μ, σ)
+    end
+end
+
+function Base.show(io::IO, ste::StudentTEmission; gap="")
+    println(io, gap, "Student t Emission model:")
+    println(io, gap, "-------------------------")
+    println(io, gap, " output_dim = $(ste.output_dim)")
+    println(io, gap, " ν = $(round(ste.ν, digits=3))")
+    println(io, gap, " μ = $(round(ste.μ, digits=3))")
+    println(io, gap, " σ = $(round(ste.σ, digits=3))")
+
+    return nothing
+end
+
+"""
+    StudentTEmission(; output_dim::Int=1, ν::Real, μ::Real, σ::Real)
+
+Create a StudentTEmission model.
+"""
+function StudentTEmission(; output_dim::Int=1, ν::Real, μ::Real, σ::Real)
+    νT, μT, σT = promote(ν, μ, σ)
+    return StudentTEmission(output_dim, νT, μT, σT)
+end
+
+"""
+    loglikelihood(model::StudentTEmission, Y::AbstractMatrix{T}) where {T<:Real}
+
+Calculate the log likelihood of the data `Y` given the Student t emission model.
+"""
+function loglikelihood(model::StudentTEmission, Y::AbstractMatrix{T}) where {T<:Real}
+    n_obs, d = size(Y)
+    if d != model.output_dim
+        error("Y has $(d) columns, expected $(model.output_dim).")
+    end
+
+    dist = LocationScale(model.μ, model.σ, TDist(model.ν))
+    ll = Vector{T}(undef, n_obs)
+
+    @inbounds for i in 1:n_obs
+        ll[i] = logpdf(dist, Y[i, 1])
+    end
+
+    return ll
+end
+
+"""
+    Random.rand(rng::AbstractRNG, model::StudentTEmission; n::Int=1)
+
+Generate `n` samples from a univariate Student t emission model.
+"""
+function Random.rand(rng::AbstractRNG, model::StudentTEmission; n::Int=1)
+    dist = LocationScale(model.μ, model.σ, TDist(model.ν))
+    return reshape(rand(rng, dist, n), n, 1)
+end
+
+"""
+    Random.rand(model::StudentTEmission; kwargs...)
+
+Generate random samples from a Student t emission model.
+"""
+function Random.rand(model::StudentTEmission; kwargs...)
+    return rand(Random.default_rng(), model; kwargs...)
+end
+
+"""
+    fit!(model::StudentTEmission, Y::AbstractMatrix{T}, w::AbstractVector{T}=ones(size(Y, 1))) where {T<:Real}
+
+Fit a univariate StudentTEmission model with fixed degrees of freedom `ν`.
+This uses the standard scale-mixture EM updates for location and scale.
+"""
+function fit!(
+    model::StudentTEmission, Y::AbstractMatrix{T}, w::AbstractVector{T}=ones(size(Y, 1))
+) where {T<:Real}
+    n_obs, d = size(Y)
+    if d != model.output_dim
+        error("Y has $(d) columns, expected $(model.output_dim).")
+    end
+    if length(w) != n_obs
+        error("w has length $(length(w)), expected $(n_obs).")
+    end
+
+    wsum = sum(w)
+    wsum <= zero(T) && return model
+
+    y = @view(Y[:, 1])
+    eps_T = sqrt(eps(T))
+    μ = isfinite(model.μ) ? model.μ : sum(w .* y) / wsum
+    σ = isfinite(model.σ) ? max(model.σ, eps_T) : sqrt(max(sum(w .* (y .- μ) .^ 2) / wsum, eps_T))
+    ν = model.ν
+
+    for _ in 1:50
+        r2 = ((y .- μ) ./ σ) .^ 2
+        λ = (ν + one(T)) ./ (ν .+ r2)
+
+        denom_μ = max(sum(w .* λ), eps_T)
+        μ_new = sum(w .* λ .* y) / denom_μ
+
+        σ2_new = sum(w .* λ .* (y .- μ_new) .^ 2) / max(wsum, eps_T)
+        σ_new = sqrt(max(σ2_new, eps_T))
+
+        if abs(μ_new - μ) <= T(1e-8) * max(one(T), abs(μ)) &&
+           abs(σ_new - σ) <= T(1e-8) * max(one(T), abs(σ))
+            μ, σ = μ_new, σ_new
+            break
+        end
+        μ, σ = μ_new, σ_new
+    end
+
+    model.μ = μ
+    model.σ = σ
+
+    return model
+end
+
+#=
 Wrapped Cauchy Emission Models
 =#
 
@@ -226,7 +485,7 @@ function Random.rand(rng::AbstractRNG, model::WrappedCauchyEmission; n::Int=1)
 
     for j in 1:d
         rho = clamp(model.ρ[j], zero(T), one(T) - eps_T)
-        a = (one(T) + rho) / (one(T) - rho)
+        a = (one(T) - rho) / (one(T) + rho)
         for i in 1:n
             u = rand(rng)
             θ = model.μ[j] + T(2) * atan(a * tan(T(pi) * (u - T(0.5))))
@@ -286,6 +545,7 @@ function fit!(
 
     return model
 end
+
 
 """
     RegressionOptimization{T<:RegressionEmission}

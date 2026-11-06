@@ -196,6 +196,16 @@ include("helper_functions.jl")
             test_WrappedCauchyHMM_fit()
         end
 
+        include("HiddenMarkovModels/BetaHMM.jl")
+        @testset "Beta HMM" begin
+            test_BetaHMM_fit()
+        end
+
+        include("HiddenMarkovModels/StudentTHMM.jl")
+        @testset "Student t HMM" begin
+            test_StudentTHMM_fit()
+        end
+
         include("HiddenMarkovModels/SwitchingGaussianRegression.jl")
         @testset "Switching Gaussian Regression" begin
             test_SwitchingGaussianRegression_fit()
@@ -472,6 +482,8 @@ include("helper_functions.jl")
             test_HMM_component_discrepancies()
             test_HMM_regression_emission_adapter()
             test_HMM_wrapped_cauchy_emission_adapter()
+            test_HMM_beta_emission_adapter()
+            test_HMM_student_t_emission_adapter()
         end
 
         @testset "PPCA Adapter" begin

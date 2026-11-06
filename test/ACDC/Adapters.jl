@@ -231,6 +231,50 @@ function test_HMM_wrapped_cauchy_emission_adapter()
     @test all(all(0 .<= pool .<= 1) for pool in result.ε_pools)
 end
 
+function test_HMM_beta_emission_adapter()
+    Random.seed!(42)
+
+    K = 1
+    D = 1
+    T_obs = 300
+
+    emission = BetaEmission(; output_dim=D, α=2.0, β=6.0)
+    A = [1.0;;]
+    πₖ = [1.0]
+
+    hmm = HiddenMarkovModel(; K=K, B=[emission], A=A, πₖ=πₖ)
+    _, data = rand(hmm; n=T_obs)
+
+    result = stochastic_drivers(hmm, data; n_samples=3)
+
+    @test length(result.ε_pools) == K
+    @test all(size(pool, 1) == D for pool in result.ε_pools)
+    @test sum(size(pool, 2) for pool in result.ε_pools) == T_obs * 3
+    @test all(all(0 .<= pool .<= 1) for pool in result.ε_pools)
+end
+
+function test_HMM_student_t_emission_adapter()
+    Random.seed!(42)
+
+    K = 1
+    D = 1
+    T_obs = 300
+
+    emission = StudentTEmission(; output_dim=D, ν=4.0, μ=0.5, σ=1.5)
+    A = [1.0;;]
+    πₖ = [1.0]
+
+    hmm = HiddenMarkovModel(; K=K, B=[emission], A=A, πₖ=πₖ)
+    _, data = rand(hmm; n=T_obs)
+
+    result = stochastic_drivers(hmm, data; n_samples=3)
+
+    @test length(result.ε_pools) == K
+    @test all(size(pool, 1) == D for pool in result.ε_pools)
+    @test sum(size(pool, 2) for pool in result.ε_pools) == T_obs * 3
+    @test all(all(0 .<= pool .<= 1) for pool in result.ε_pools)
+end
+
 # =============================================================================
 # Probabilistic PCA Adapter Tests
 # =============================================================================

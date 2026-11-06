@@ -317,6 +317,8 @@ state. This avoids dilution from uniform samples on inactive states.
 
 Supported emission types:
 - `GaussianEmission`: Whitened residuals through normal CDF
+- `BetaEmission`: Beta CDF (univariate only)
+- `StudentTEmission`: Student t CDF (univariate only)
 - `GaussianRegressionEmission`: Regression residuals through normal CDF
 - `BernoulliRegressionEmission`: Randomized PIT for binary outcomes
 - `PoissonRegressionEmission`: Randomized PIT for count outcomes
@@ -396,6 +398,71 @@ function stochastic_drivers(
     return StochasticDriverResult(ε_pools, usage)
 end
 
+"""
+    stochastic_drivers(model::HiddenMarkovModel, data_trials; n_samples=1, X=nothing)
+
+Recover stochastic drivers for a Hidden Markov Model fit to multiple trials of data.
+Aggregates per-state driver pools across trials while computing usage as the overall
+fraction of time spent in each state.
+"""
+function stochastic_drivers(
+    model::StateSpaceDynamics.HiddenMarkovModel{T},
+    data_trials::Vector{<:AbstractMatrix{T}};
+    n_samples::Int=1,
+    X::Union{Vector{<:AbstractMatrix{<:Real}},Nothing}=nothing,
+) where {T<:Real}
+    K = model.K
+    emission_dim = model.B[1].output_dim
+
+    γ_trials = if X === nothing
+        StateSpaceDynamics.class_probabilities(model, data_trials)
+    else
+        StateSpaceDynamics.class_probabilities(model, data_trials, X)
+    end
+
+    total_obs = sum(size(Y, 2) for Y in data_trials)
+    usage = zeros(T, K)
+    for γ in γ_trials
+        usage .+= vec(sum(γ; dims=2))
+    end
+    usage ./= total_obs
+
+    ε_lists = [Vector{Vector{T}}() for _ in 1:K]
+
+    for s in 1:n_samples
+        for i in eachindex(data_trials)
+            Y = data_trials[i]
+            γ = γ_trials[i]
+            X_trial = X === nothing ? nothing : X[i]
+            N = size(Y, 2)
+
+            for t in 1:N
+                z_t = _sample_categorical(@view γ[:, t])
+                ε_sample = Vector{T}(undef, emission_dim)
+                _emission_to_driver!(
+                    ε_sample,
+                    model.B[z_t],
+                    @view(Y[:, t]),
+                    X_trial === nothing ? nothing : @view(X_trial[:, t]),
+                )
+                push!(ε_lists[z_t], ε_sample)
+            end
+        end
+    end
+
+    ε_pools = Vector{Matrix{T}}(undef, K)
+    for k in 1:K
+        n_k = length(ε_lists[k])
+        if n_k > 0
+            ε_pools[k] = reduce(hcat, ε_lists[k])
+        else
+            ε_pools[k] = Matrix{T}(undef, emission_dim, 0)
+        end
+    end
+
+    return StochasticDriverResult(ε_pools, usage)
+end
+
 # =============================================================================
 # HMM Emission-Specific Driver Computation
 # =============================================================================
@@ -428,6 +495,49 @@ function _emission_to_driver!(
     for d in eachindex(ε_out)
         ε_out[d] = _normal_cdf(whitened[d])
     end
+end
+
+"""
+    _emission_to_driver!(ε_out, emission::BetaEmission, y, x)
+
+Compute stochastic drivers for Beta emission using the Beta CDF.
+
+# Arguments
+- `ε_out::AbstractVector`: Output vector for drivers (modified in-place)
+- `emission::BetaEmission`: Beta emission parameters
+- `y::AbstractVector`: Observation vector in `(0, 1)` with length 1
+- `x::Nothing`: Unused (no covariates)
+"""
+function _emission_to_driver!(
+    ε_out::AbstractVector{T},
+    emission::StateSpaceDynamics.BetaEmission{T},
+    y::AbstractVector{T},
+    x::Nothing,
+) where {T<:Real}
+    eps_T = sqrt(eps(T))
+    dist = Beta(emission.α, emission.β)
+    ε_out[1] = T(cdf(dist, clamp(y[1], eps_T, one(T) - eps_T)))
+end
+
+"""
+    _emission_to_driver!(ε_out, emission::StudentTEmission, y, x)
+
+Compute stochastic drivers for Student t emission using the Student t CDF.
+
+# Arguments
+- `ε_out::AbstractVector`: Output vector for drivers (modified in-place)
+- `emission::StudentTEmission`: Student t emission parameters
+- `y::AbstractVector`: Observation vector with length 1
+- `x::Nothing`: Unused (no covariates)
+"""
+function _emission_to_driver!(
+    ε_out::AbstractVector{T},
+    emission::StateSpaceDynamics.StudentTEmission{T},
+    y::AbstractVector{T},
+    x::Nothing,
+) where {T<:Real}
+    dist = LocationScale(emission.μ, emission.σ, TDist(emission.ν))
+    ε_out[1] = T(cdf(dist, y[1]))
 end
 
 """
@@ -559,7 +669,12 @@ end
 # =============================================================================
 
 """
-    stochastic_drivers(model::ProbabilisticPCA, data; n_samples=1) -> StochasticDriverResult
+    stochastic_drivers(
+        model::ProbabilisticPCA,
+        data;
+        n_samples=1,
+        alpha=0.9
+    ) -> StochasticDriverResult
 
 Recover stochastic drivers for Probabilistic PCA.
 
@@ -586,12 +701,18 @@ component k's specification.
 
 # Keyword Arguments
 - `n_samples::Int=1`: Number of sampling passes over all observations
+- `alpha::Real=0.9`: Hybrid weight for strength-based variance allocation (default 0.9).
+  Larger values allocate more noise to strong components (looser PIT), smaller values
+  approach equal per-component noise (stricter PIT).
 
 # Returns
 - `StochasticDriverResult` with per-component driver pools
 """
 function stochastic_drivers(
-    model::StateSpaceDynamics.ProbabilisticPCA{T}, data::AbstractMatrix{T}; n_samples::Int=1
+    model::StateSpaceDynamics.ProbabilisticPCA{T},
+    data::AbstractMatrix{T};
+    n_samples::Int=1,
+    alpha::Real=0.9,
 ) where {T<:Real}
     D, N = size(data)
     K = model.k  # number of latent factors
@@ -624,6 +745,8 @@ function stochastic_drivers(
     # Accept observation n for component k with prob σ²_k(n) / max_m σ²_k(m)
     max_var_k = vec(maximum(σ²_kn; dims=2))
 
+    alpha_T = clamp(T(alpha), zero(T), one(T))
+
     # Collect drivers per component
     ε_lists = [Vector{Vector{T}}() for _ in 1:K]
 
@@ -652,7 +775,8 @@ function stochastic_drivers(
                     continue
                 end
                 var_share = σ²_kn[k, n] / total_var_n
-                σ_k = sqrt(σ² * var_share)
+                blended_share = alpha_T * var_share + (one(T) - alpha_T) * (one(T) / K)
+                σ_k = sqrt(σ² * blended_share)
                 σ_k = max(σ_k, sqrt(σ² * eps(T)))
 
                 ε_sample = Vector{T}(undef, D)
